@@ -2,65 +2,159 @@ import streamlit as st
 import pandas as pd
 import joblib
 
-st.set_page_config(
-    page_title="Healthcare Provider Fraud Detection",
-    page_icon="🏥",
-    layout="wide"
-)
+st.set_page_config(page_title="Healthcare Provider Fraud Detection")
 
 st.title("🏥 Healthcare Provider Fraud Detection")
 
-st.write("""
-Upload a CSV containing the provider-level features used for model training.
-The application predicts whether each provider is potentially fraudulent.
-""")
-
 model = joblib.load("fraud_model.pkl")
 
-uploaded_file = st.file_uploader(
-    "Upload Provider Feature CSV",
-    type=["csv"]
+st.write("Upload the three unseen dataset files.")
+
+provider_file = st.file_uploader(
+    "Upload Unseen Provider File",
+    type="csv"
 )
 
-if uploaded_file is not None:
+ip_file = st.file_uploader(
+    "Upload Unseen Inpatient File",
+    type="csv"
+)
 
-    data = pd.read_csv(uploaded_file)
+op_file = st.file_uploader(
+    "Upload Unseen Outpatient File",
+    type="csv"
+)
 
-    st.subheader("Uploaded Data")
-    st.dataframe(data.head())
+if provider_file and ip_file and op_file:
 
-    # Remove Provider column if present
-    provider = None
-    if "Provider" in data.columns:
-        provider = data["Provider"]
-        X = data.drop(columns=["Provider"])
-    else:
-        X = data
+    unseen = pd.read_csv(provider_file)
+    inpatient = pd.read_csv(ip_file)
+    outpatient = pd.read_csv(op_file)
 
-    probability = model.predict_proba(X)[:, 1]
-    prediction = model.predict(X)
+    inpatient["AdmissionDt"] = pd.to_datetime(inpatient["AdmissionDt"])
+    inpatient["DischargeDt"] = pd.to_datetime(inpatient["DischargeDt"])
 
-    prediction = ["Yes" if p == 1 else "No" for p in prediction]
+    inpatient["HospitalStay"] = (
+        inpatient["DischargeDt"] -
+        inpatient["AdmissionDt"]
+    ).dt.days
 
-    result = pd.DataFrame()
+    ip_claims = inpatient.groupby(
+        "Provider"
+    ).size().reset_index(name="IP_Claims")
 
-    if provider is not None:
-        result["Provider"] = provider
+    op_claims = outpatient.groupby(
+        "Provider"
+    ).size().reset_index(name="OP_Claims")
 
-    result["Probability"] = probability
-    result["Predicted Class"] = prediction
+    ip_avg_claim = inpatient.groupby(
+        "Provider"
+    )["InscClaimAmtReimbursed"].mean().reset_index()
 
-    st.subheader("Prediction Results")
-    st.dataframe(result)
-
-    csv = result.to_csv(index=False).encode("utf-8")
-
-    st.download_button(
-        label="Download Prediction CSV",
-        data=csv,
-        file_name="Predictions.csv",
-        mime="text/csv"
+    ip_avg_claim.rename(
+        columns={
+            "InscClaimAmtReimbursed":"IP_AvgClaim"
+        },
+        inplace=True
     )
 
-else:
-    st.info("Please upload a CSV file.")
+    op_avg_claim = outpatient.groupby(
+        "Provider"
+    )["InscClaimAmtReimbursed"].mean().reset_index()
+
+    op_avg_claim.rename(
+        columns={
+            "InscClaimAmtReimbursed":"OP_AvgClaim"
+        },
+        inplace=True
+    )
+
+    ip_avg_deductible = inpatient.groupby(
+        "Provider"
+    )["DeductibleAmtPaid"].mean().reset_index()
+
+    ip_avg_deductible.rename(
+        columns={
+            "DeductibleAmtPaid":"IP_AvgDeductible"
+        },
+        inplace=True
+    )
+
+    avg_stay = inpatient.groupby(
+        "Provider"
+    )["HospitalStay"].mean().reset_index()
+
+    avg_stay.rename(
+        columns={
+            "HospitalStay":"AvgHospitalStay"
+        },
+        inplace=True
+    )
+
+    final_test = unseen.copy()
+
+    final_test = final_test.merge(
+        ip_claims,
+        on="Provider",
+        how="left"
+    )
+
+    final_test = final_test.merge(
+        op_claims,
+        on="Provider",
+        how="left"
+    )
+
+    final_test = final_test.merge(
+        ip_avg_claim,
+        on="Provider",
+        how="left"
+    )
+
+    final_test = final_test.merge(
+        op_avg_claim,
+        on="Provider",
+        how="left"
+    )
+
+    final_test = final_test.merge(
+        ip_avg_deductible,
+        on="Provider",
+        how="left"
+    )
+
+    final_test = final_test.merge(
+        avg_stay,
+        on="Provider",
+        how="left"
+    )
+
+    final_test.fillna(0, inplace=True)
+
+    X = final_test.drop("Provider", axis=1)
+
+    probability = model.predict_proba(X)[:,1]
+
+    prediction = model.predict(X)
+
+    prediction = [
+        "Yes" if x==1 else "No"
+        for x in prediction
+    ]
+
+    result = pd.DataFrame({
+        "Provider":final_test["Provider"],
+        "Probability":probability,
+        "Predicted Class":prediction
+    })
+
+    st.success("Prediction Completed")
+
+    st.dataframe(result)
+
+    st.download_button(
+        "Download Submission",
+        result.to_csv(index=False),
+        "Submission.csv",
+        "text/csv"
+    )
